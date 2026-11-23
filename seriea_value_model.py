@@ -361,6 +361,7 @@ def sisal_analysis(pdf_path: Path | None, data_dir: Path, bankroll: float,
     from sisal_import import (SisalImportError, parse_sisal_pdf,
                               check_freshness, download_sisal_pdf, OFFICIAL_PDF_URL)
     from sisal_reporting import rank_full_board, terminal_board, write_readable_report
+    from xg_elo_model import load_xg, fetch_xg, forecast_asof, XGDataError
 
     now=analysis_time or datetime.now(ZoneInfo('Europe/Rome')).replace(tzinfo=None)
     if pdf_path is None:
@@ -416,6 +417,19 @@ def sisal_analysis(pdf_path: Path | None, data_dir: Path, bankroll: float,
     from model_evaluation import load_validation_profile, blend_probabilities
     model=fit(history,as_of)
     profile=load_validation_profile(data_dir)
+    if not no_refresh:
+        try:
+            fetch_xg(data_dir, seasons=(2026,))
+        except XGDataError as exc:
+            print(f'ATTENZIONE: aggiornamento xG 2026/27 non riuscito: {exc}',
+                  file=sys.stderr)
+    try:
+        xg_matches,xg_quality=load_xg(data_dir,df)
+        print(f"xG verificati: {xg_quality['matched']}; fonti per stagione separate.")
+    except XGDataError as exc:
+        print(f'ATTENZIONE: xG non verificati: {exc}; uso solo Elo.',file=sys.stderr)
+        xg_matches=pd.DataFrame(columns=['Date','HomeTeam','AwayTeam','XGH','XGA','Provider','Season'])
+
     known=set(model.names)
     rows=[]
     unrecognized=[]
@@ -435,6 +449,8 @@ def sisal_analysis(pdf_path: Path | None, data_dir: Path, bankroll: float,
         else:
             n1,n2=strength_counts(history,home,away)
             raw_probs=model.probabilities(home,away)
+        independent = (forecast_asof(history,xg_matches,as_of,home,away)
+                       if recognized else {'status':'SQUADRA_NON_RICONOSCIUTA'})
         odds={'1':event['OddsH'],'X':event['OddsD'],'2':event['OddsA']}
         if event['OddsOver25'] is not None and event['OddsUnder25'] is not None:
             odds.update({'OVER2.5':event['OddsOver25'],'UNDER2.5':event['OddsUnder25']})
@@ -449,6 +465,9 @@ def sisal_analysis(pdf_path: Path | None, data_dir: Path, bankroll: float,
             ev=p*price-1
             edge=p-no_vig_probs[market]
             raw=raw_probs[market] if raw_probs is not None else float('nan')
+            pred_elo=(independent.get('elo') or {}).get(market,float('nan'))
+            pred_xg=(independent.get('xg') or {}).get(market,float('nan'))
+            pred_hybrid=(independent.get('hybrid') or {}).get(market,float('nan'))
             rows.append({
                 'Data':event['Date'], 'Ora':event['Time'],
                 'Partita':f'{event["HomeTeamSisal"]} - {event["AwayTeamSisal"]}',
@@ -457,6 +476,13 @@ def sisal_analysis(pdf_path: Path | None, data_dir: Path, bankroll: float,
                 'Mercato':market, 'QuotaSisal':round(price,3),
                 'ProbModello':round(p,5), 'ProbPoissonDC':round(raw,5),
                 'EVPoissonDC':round(raw*price-1,5),
+                'ProbElo':round(pred_elo,5),
+                'ProbXG':round(pred_xg,5),
+                'ProbXGElo':round(pred_hybrid,5),
+                'DifferenzaEloVsSisal':round(pred_elo-no_vig_probs[market],5),
+                'DifferenzaXGEloVsSisal':round(pred_hybrid-no_vig_probs[market],5),
+                'FonteXG':independent.get('provider'),
+                'StatoXG':independent.get('status'),
                 'QuotaEqua':round(1/p,3),
                 'ProbMercatoNoVig':round(no_vig_probs[market],5),
                 'EV':round(ev,5), 'Edge':round(edge,5),
@@ -513,6 +539,10 @@ def main() -> None:
     s=sub.add_parser('backtest',help='Walk-forward calibration and locked holdout')
     s.add_argument('--start',default='2025-08-01')
     s.add_argument('--bankroll',type=float,default=60.0)
+    s=sub.add_parser('xg-fetch',help='Download sourced xG CSVs, strictly validated on load')
+    s.add_argument('--seasons',nargs='+',type=int,default=[2023,2024,2025,2026])
+    s=sub.add_parser('xg-backtest',help='Compare xG/Elo hypotheses and bookmaker on same games')
+    s.add_argument('--start',default='2025-08-01')
     s=sub.add_parser('sisal-audit',help='Audit logged Sisal odds vs final scores')
     s=sub.add_parser('predict',help='Predict user-entered fixtures and current odds')
     s.add_argument('--fixtures',type=Path,required=True)
@@ -525,6 +555,22 @@ def main() -> None:
     args=parser.parse_args()
     if args.command=='fetch':
         fetch(args.seasons,args.data_dir)
+        return
+    if args.command=='xg-fetch':
+        from xg_elo_model import fetch_xg, load_xg
+        fetch_xg(args.data_dir,args.seasons)
+        official=read_history(args.data_dir)
+        _,meta=load_xg(args.data_dir,official)
+        print('MATCHES VALIDATED:',meta['matched'])
+        return
+    if args.command=='xg-backtest':
+        from xg_elo_model import load_xg, evaluate_xg_elo
+        import json
+        official=read_history(args.data_dir)
+        xg,info=load_xg(args.data_dir,official)
+        print('SOURCE COVERAGE:', info['matched'])
+        summary=evaluate_xg_elo(official,xg,args.data_dir,start=args.start)
+        print(json.dumps(summary,ensure_ascii=False,indent=2))
         return
     if args.bankroll<=0: raise ValueError('Bankroll must be > 0')
     if args.command=='sisal':
