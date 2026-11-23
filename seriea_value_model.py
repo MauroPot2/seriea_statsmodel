@@ -543,6 +543,10 @@ def main() -> None:
     s.add_argument('--seasons',nargs='+',type=int,default=[2023,2024,2025,2026])
     s=sub.add_parser('xg-backtest',help='Compare xG/Elo hypotheses and bookmaker on same games')
     s.add_argument('--start',default='2025-08-01')
+    s=sub.add_parser('market-backtest',help='Retrospective multi-bookmaker opening-price comparison')
+    s.add_argument('--start',default='2025-08-01')
+    s=sub.add_parser('market-compare',help='Compare timestamped manual multi-bookmaker prices')
+    s.add_argument('--quotes',type=Path,required=True)
     s=sub.add_parser('sisal-audit',help='Audit logged Sisal odds vs final scores')
     s=sub.add_parser('predict',help='Predict user-entered fixtures and current odds')
     s.add_argument('--fixtures',type=Path,required=True)
@@ -572,7 +576,27 @@ def main() -> None:
         summary=evaluate_xg_elo(official,xg,args.data_dir,start=args.start)
         print(json.dumps(summary,ensure_ascii=False,indent=2))
         return
-    if args.bankroll<=0: raise ValueError('Bankroll must be > 0')
+    if args.command=='market-backtest':
+        from market_comparison import compare_historical
+        import json
+        official=read_history(args.data_dir)
+        metrics=compare_historical(official,args.data_dir,start=args.start)
+        print(json.dumps(metrics,ensure_ascii=False,indent=2))
+        print(f'Files: {args.data_dir}/market_historical_report.md, '
+              f'{args.data_dir}/market_historical_prices.csv, '
+              f'{args.data_dir}/market_historical_scores.csv')
+        return
+    if args.command=='market-compare':
+        from market_comparison import read_live_snapshot, compare_live_snapshot
+        import json
+        observations=read_live_snapshot(args.quotes)
+        _,outcome=compare_live_snapshot(observations,args.data_dir)
+        print(json.dumps(outcome,ensure_ascii=False,indent=2))
+        print(f'Files: {args.data_dir}/market_live_report.md, '
+              f'{args.data_dir}/market_live_comparison.csv')
+        return
+    if getattr(args,'bankroll',60.0)<=0:
+        raise ValueError('Bankroll must be > 0')
     if args.command=='sisal':
         sisal_analysis(args.pdf,args.data_dir,args.bankroll,no_refresh=args.no_refresh)
         return
