@@ -1,0 +1,35 @@
+name: Statistical validation
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install project dependencies
+        run: python -m pip install -r requirements_seriea.txt
+      - name: Regression and unit tests
+        run: python -m unittest discover -p 'test_*.py' -v
+      - name: Reproduce historical holdout
+        run: python seriea_value_model.py backtest --start 2025-08-01 --bankroll 60 | tee holdout_stdout.txt
+      - name: Archive ALL outcomes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seriea-holdout-diagnostics
+          if-no-files-found: warn
+          path: |
+            holdout_stdout.txt
+            seriea_data/validation_report.md
+            seriea_data/validation_profile.json
+            seriea_data/backtest_predictions.csv
+            seriea_data/backtest_bets.csv
+            seriea_data/backtest_segments.csv
+            seriea_data/calibration_bins.csv
