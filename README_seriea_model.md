@@ -1,105 +1,82 @@
-# Serie A / Sisal — analisi matematica delle quote
+# Serie A Stats Model
 
-Piccolo progetto di ricerca in Python. Importa il foglio pubblico delle quote **Sisal**, legge solo le partite di Serie A, stima le probabilità con Poisson e genera una tabella con 1X2 e Under/Over 2,5. **Non effettua scommesse** e non promette guadagni.
+A Python research tool for estimating Serie A probabilities and comparing those estimates with public Sisal prices. It does not place bets or establish a profitable betting strategy.
 
-## Utilizzo sul Mac (da Terminale)
+## Setup (macOS)
 
-Estrai lo ZIP, apri Terminale dentro la cartella ed esegui:
+    python3 -m venv .venv
+    source .venv/bin/activate
+    pip install -r requirements_seriea.txt
+    python3 seriea_value_model.py fetch
+    python3 seriea_value_model.py backtest --bankroll 60
+    python3 seriea_value_model.py sisal --bankroll 60
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements_seriea.txt
-python seriea_value_model.py sisal --bankroll 60
-```
+The Sisal command downloads a fresh official public price-sheet PDF, parses future Serie A matches, checks historical results, and writes a research report. An old PDF, unmatched teams or incomplete results block recommendations. **All Sisal stakes remain zero until a separate, prospective Sisal validation exists.** A Bet365 backtest alone cannot validate Sisal.
 
-Il comando `sisal` tenta automaticamente di:
+## Statistical evaluation
 
-1. Scaricare il PDF ufficiale **Calcio Base per Manifestazione** da Sisal.
-2. Estrarre calendario, squadre, 1X2, Under/Over 2,5 dalla sezione *ITA Serie A*.
-3. Verificare la data di aggiornamento stampata in fondo al PDF; **se è più vecchio di 48 ore, interrompere l'analisi**.
-4. Scaricare i CSV storici da Football-Data e integrare soltanto risultati mancanti verificati dal feed secondario open-matchday. Se il confronto delle fonti o il calendario non torna, produrre soltanto un report esplorativo, **senza candidate né puntate**.
-5. Calcolare probabilità, quote eque, valore atteso (EV), probabilità del mercato senza margine e una eventuale puntata teorica.
+The model now compares four distinct sets of probabilities:
 
-**Non devi compilare manualmente il CSV delle partite.**
+1. Independent Poisson (home advantage, attack/defence, time decay and L2 regularisation).
+2. A conditional, two-stage Dixon–Coles low-score correction. It is not a joint DC maximum-likelihood fit.
+3. Bet365 opening prices with the bookmaker margin removed proportionally.
+4. Linear pooling of the DC model and the market. Pool weights are selected on the earlier season **using log loss only**, never by maximizing retrospective ROI.
 
-### File prodotti
+**Chronological protocol:** calibration on 2024-09-01 through 2025-07-31, then a predeclared holdout beginning 2025-08-01. On every date, model fitting uses only older match results. Candidate weight values are fixed in advance at 0, 0.25, 0.50, 0.75 and 1. If calibration history is insufficient, the market-only fallback is used.
 
-In `seriea_data/` trovi:
+**Strict prices:** backtests use historical Bet365 opening quotes (B365H/B365D/B365A and B365>2.5/B365<2.5). No silent switching to closing odds. A historical opening quote still does not guarantee that a wager was available at that price.
 
-- `sisal_foglio_quote.pdf`: PDF scaricato da Sisal.
-- `sisal_quote_importate.csv`: gli incontri e le quote realmente estratti dal PDF.
-- `risultati_integrati_open_matchday.csv`: i soli risultati aggiunti dal feed secondario (vuoto quando non servono).
-- `sisal_analisi.csv`: tutti i mercati analizzati (comprese le scelte **NO_BET**). Se lo storico è vecchio e non siamo in una sosta verificata, ogni riga riporta `STORICO_DA_AGGIORNARE` e una puntata teorica di **0 EUR**.
-- `sisal_report.md`: il riepilogo leggibile delle sole candidate matematiche.
+The earlier minus-4.6%-ROI test used a different historical price selection method: its results must not be compared directly with the new ROI.
 
-Il foglio PDF è uno **snapshot**, non un feed live. Le quote possono cambiare prima della partita: verifica sempre la quota effettiva. I contenuti e il formato del sito sono sotto controllo di Sisal: se cambiano, l'importatore potrebbe richiedere modifiche.
+## Reports
 
-### Se il download automatico non funziona
+Generated under the seriea_data directory:
 
-Scarica il PDF dal [foglio quote Sisal](https://www.sisal.it/scommesse-matchpoint/foglio-quote), scegli **Calcio Base per Manifestazione** e salvalo sul Mac. Poi:
+- validation_report.md: model versus market, log loss, Brier, paper-bet ROI, drawdown, and diagnostics by bet type and odds band.
+- validation_profile.json: fixed calibration weights, holdout metrics, and Sisal validation status.
+- backtest_predictions.csv: all evaluated probabilities and realised outcomes, **not only winning selections**.
+- backtest_bets.csv: all hypothetical wagers, including losses.
+- backtest_segments.csv: segmented results by market and odds range.
+- calibration_bins.csv: predicted versus observed frequencies by probability bucket.
+- sisal_analisi.csv: price-by-price current research output, including raw Dixon–Coles probabilities and market-anchored probabilities separately.
+- sisal_forecast_archive.csv: timestamped snapshots of predictions and quotes **observed before kickoff**.
+- sisal_audit_matches.csv: later scoring of completed Sisal fixtures already present in the snapshot archive.
+- risultati_integrati_open_matchday.csv: any missing results cross-checked against the secondary daily schedule.
 
-```bash
-python seriea_value_model.py sisal --pdf ~/Downloads/nome-del-file.pdf --bankroll 60
-```
+Use the audit after matches have been completed and the local Football-Data results are available:
 
-Il PDF deve essere recente. Se appare l'errore **"Foglio Sisal vecchio"**, scaricane una versione aggiornata: non disattivare il controllo per valutare quote reali.
+    python3 seriea_value_model.py sisal-audit
 
-### Se i nomi delle squadre non coincidono
+It scores the **first** archived pre-match snapshot for each fixture/market, not whichever quote looks most profitable after the event. It refuses to extrapolate an advantage from a few results.
 
-L'importatore riconosce i nomi più comuni e alcune varianti (es. `Hellas Verona` -> `Verona`). In caso di nome sconosciuto **salta la partita** e lo segnala: non abbina squadre per somiglianza incerta.
+Unit tests and reproducible evaluation:
 
-## Modello e limiti
+    python3 -m unittest discover -p 'test_*.py' -v
+    python3 seriea_value_model.py backtest --start 2025-08-01 --bankroll 60
 
-- Distribuzione di Poisson indipendente per le reti, con forze di attacco/difesa, vantaggio casa, riduzione del peso delle partite vecchie e penalità L2.
-- Mercati: 1, X, 2, OVER2.5, UNDER2.5.
-- Probabilità implicita del mercato: inverso quota, normalizzato sul mercato completo (margine rimosso in modo proporzionale).
-- EV: `probabilità_del_modello × quota_Sisal - 1`. EV stimato è **solo una previsione**, non una garanzia.
-- Candidate se EV >= 5%, vantaggio sulla probabilità normalizzata del mercato >= 3 punti percentuali, almeno 8 partite nello storico per squadra. Queste soglie **non sono state validate contro Sisal**.
-- Puntata simulata: un quarto di Kelly con limite dell'1% del bankroll per partita e del 5% esposto in totale (per 60 €, massimo **0,60 € a partita** e **3 € complessivi**). Se Sisal richiede una puntata minima superiore, **non arrotondare in alto**.
-- Se non ci sono candidate, il risultato corretto è `NESSUNA CANDIDATA`.
+GitHub Actions runs both on a pull request using the CSV data committed in the repository and uploads all results, including losses.
 
-Il modello è una **baseline**, non un modello Dixon–Coles completo: non usa xG, infortuni, quote di apertura vs chiusura, titolari probabili o cambi d'allenatore. Non c'è alcuna prova, al momento, di un vantaggio sistematico contro le quote Sisal. Prima di rischiare denaro è indispensabile un backtest su dati cronologici, idealmente con quote storiche *Sisal effettivamente disponibili in quel momento*.
+## Policy and limitations
 
-## Altri comandi
+- Paper-bet evaluation still uses the original, **unoptimised** EV >= 5%, model-edge >= 3 percentage-point thresholds and 1% maximum stake per fixture. The thresholds are not changed to achieve a desired ROI.
+- Better forecasting metrics after market anchoring are **not** an independent advantage over a market used as input.
+- A Bet365 backtest is not equivalent to a Sisal backtest. Real Sisal quotes must be collected prospectively, with timestamps, to evaluate what was genuinely observable.
+- No validated xG, lineups, injuries or in-play information are used or invented.
+- Neither positive historical ROI nor a positive bootstrap interval guarantees future results.
+- The source for current Serie A results is daily, not live. Incomplete games may prevent the current-odds analysis.
+- The original EUR 60 bankroll is a maximum exposure budget, not an investment principal. The program performs no automatic wagering.
 
-```bash
-python seriea_value_model.py fetch
-python seriea_value_model.py backtest --start 2025-08-01 --bankroll 60
-python -m unittest discover -p 'test_*.py' -v
-```
+## Sources
 
-Il backtest esistente usa quote di Football-Data (soprattutto Bet365): **non rappresenta una prova contro Sisal**. La selezione di quote storiche di chiusura può introdurre altri limiti di fattibilità temporale.
+Football-Data (historical Serie A results and Bet365 prices):
+https://www.football-data.co.uk/italym.php
 
-Dati e riferimenti:
-- Foglio ufficiale Sisal: https://www.sisal.it/scommesse-matchpoint/foglio-quote
-- Fonte risultati storici: https://www.football-data.co.uk/italym.php
-- Feed secondario risultati 2026/27: https://github.com/oladeeayo/open-matchday (uso personale, non commerciale; attribuzione richiesta).
-- Dixon e Coles (1997), *Modelling Association Football Scores and Inefficiencies in the Football Betting Market*.
+Sisal public price sheet:
+https://www.sisal.it/scommesse-matchpoint/foglio-quote
 
-### Stato dei test
+open-matchday supplementary fixture and result checks:
+https://github.com/oladeeayo/open-matchday
 
-I test automatizzati includono un **PDF artificiale** con la stessa disposizione delle colonne visibile nel documento ufficiale. In questo ambiente il download diretto del PDF reale Sisal non era disponibile, quindi la lettura di un PDF reale aggiornato non è stata verificata da qui. Il programma interrompe l'analisi in caso di formato imprevisto, dati scaduti o quote incomplete, anziché inventare previsioni.
+Dixon and Coles (1997), *Modelling Association Football Scores and Inefficiencies in the Football Betting Market*, Journal of the Royal Statistical Society, Series C.
 
-### Aggiornamento automatico dei risultati
-
-Il comando `sisal` usa Football-Data come fonte storica principale e consulta
-`open-matchday` per integrare eventuali risultati 2026/27 mancanti. Prima di
-aggiungerli controlla: squadre riconosciute, risultati non contraddittori,
-nessun duplicato, 10 incontri per giornata considerando partite giocate e
-future, assenza di incontri già iniziati senza risultato. Non sostituisce
-mai i risultati già presenti in Football-Data.
-
-Se il feed secondario non è disponibile o non supera i controlli, il report
-rimane **esplorativo**, con puntate a zero. Non si disattiva la protezione.
-Il feed è giornaliero e non live: durante una giornata in corso l'analisi può
-restare bloccata finché non vengono pubblicati i risultati.
-
-Esegui sempre lo stesso comando:
-
-```bash
-python3 seriea_value_model.py sisal --bankroll 60
-```
-
-`--no-refresh` è destinato ai test offline: salta l'aggiornamento, dunque
-non va usato per analizzare quote attuali.
+Synthetic tests verify code behaviour, not predictive skill. Only evaluation against authentic, unseen historical and later prospective Sisal data can support claims of reliability. Zero qualifying bets is a valid outcome.
