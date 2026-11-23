@@ -161,22 +161,26 @@ def load_xg(directory: Path, official: pd.DataFrame) -> tuple[pd.DataFrame,dict]
     return matched,stats
 
 
+def update_elo_day(ratings: dict[str,float], day: pd.DataFrame) -> None:
+    """Apply all same-date scores simultaneously after their forecasts."""
+    changes:dict[str,float]={}
+    for row in day.itertuples():
+        home,away=str(row.HomeTeam),str(row.AwayTeam)
+        rh,ra=ratings.get(home,1500.0),ratings.get(away,1500.0)
+        expectation=1.0/(1.0+10**(-(rh+ELO_HOME_BONUS-ra)/400))
+        outcome=1.0 if row.FTHG>row.FTAG else (0.5 if row.FTHG==row.FTAG else 0.)
+        delta=ELO_K*(outcome-expectation)
+        changes[home]=changes.get(home,0.)+delta
+        changes[away]=changes.get(away,0.)-delta
+    for team,delta in changes.items():
+        ratings[team]=ratings.get(team,1500.0)+delta
+
+
 def elo_ratings(history: pd.DataFrame) -> dict[str,float]:
     """Pre-match Elo updated in date batches; same-day results are symmetric."""
-    rows=history.sort_values(['Date','HomeTeam','AwayTeam'])
     ratings:dict[str,float]={}
-    for _,day in rows.groupby('Date',sort=True):
-        changes:dict[str,float]={}
-        for row in day.itertuples():
-            home,away=str(row.HomeTeam),str(row.AwayTeam)
-            rh,ra=ratings.get(home,1500.0),ratings.get(away,1500.0)
-            expectation=1.0/(1.0+10**(-(rh+ELO_HOME_BONUS-ra)/400))
-            outcome=1.0 if row.FTHG>row.FTAG else (0.5 if row.FTHG==row.FTAG else 0.)
-            delta=ELO_K*(outcome-expectation)
-            changes[home]=changes.get(home,0.)+delta
-            changes[away]=changes.get(away,0.)-delta
-        for team,delta in changes.items():
-            ratings[team]=ratings.get(team,1500.0)+delta
+    for _,day in history.sort_values(['Date','HomeTeam','AwayTeam']).groupby('Date',sort=True):
+        update_elo_day(ratings, day)
     return ratings
 
 
@@ -202,13 +206,17 @@ def _score_probs(home_goals: float,away_goals: float) -> dict[str,float]:
 
 
 def forecast_asof(history: pd.DataFrame, xg: pd.DataFrame, cutoff: pd.Timestamp,
-                  home: str, away: str) -> dict:
+                  home: str, away: str, *,
+                  _precomputed_ratings: dict[str,float] | None = None) -> dict:
     """Independent hypotheses, strictly pre-date; no bookmaker probabilities."""
     cutoff=pd.Timestamp(cutoff).normalize()
     past=history[history.Date<cutoff]
     if len(past)<300:
         return {'status':'INSUFFICIENT_GOALS_HISTORY'}
-    ratings=elo_ratings(past)
+    # Evaluation supplies the Elo snapshot built BEFORE the current date;
+    # direct calls independently rebuild the same snapshot from past results.
+    ratings = (_precomputed_ratings if _precomputed_ratings is not None
+               else elo_ratings(past))
     base_h,base_a=_scoring_rates(past)
     diff=ratings.get(home,1500.)-ratings.get(away,1500.)
     modifier=float(np.clip(diff/ELO_GOAL_SCALE,-.6,.6))
@@ -276,6 +284,9 @@ def evaluate_xg_elo(history: pd.DataFrame, xg: pd.DataFrame,
     if start_date<pd.Timestamp('2025-08-01'):
         raise ValueError('The evaluation start is fixed at 2025-08-01 or later')
     evaluated=[]
+    # Incremental ratings are mathematically equivalent to repeatedly replaying
+    # all prior games, but avoid hundreds of expensive groupby reconstructions.
+    ratings=elo_ratings(history[history.Date<start_date])
     for date, matches in history[history.Date>=start_date].groupby('Date',sort=True):
         day=pd.Timestamp(date)
         for _,row in matches.iterrows():
@@ -283,7 +294,8 @@ def evaluate_xg_elo(history: pd.DataFrame, xg: pd.DataFrame,
             market=no_vig(prices,('1','X','2'))
             if not market:
                 continue
-            fc=forecast_asof(history,xg,day,row.HomeTeam,row.AwayTeam)
+            fc=forecast_asof(history,xg,day,row.HomeTeam,row.AwayTeam,
+                             _precomputed_ratings=ratings)
             target='1' if row.FTHG>row.FTAG else ('X' if row.FTHG==row.FTAG else '2')
             for method, probs in [('Elo',fc.get('elo')),
                                   ('xG',fc.get('xg')),
@@ -299,6 +311,9 @@ def evaluate_xg_elo(history: pd.DataFrame, xg: pd.DataFrame,
                                   'log_loss':-math.log(max(probs[target],1e-12)),
                                   'brier':sum((probs[v]-float(v==target))**2
                                               for v in ('1','X','2'))})
+        # Only now, after EVERY fixture of this date has been predicted,
+        # may these results update the ratings used on the next date.
+        update_elo_day(ratings, matches)
     if not evaluated:
         raise XGDataError('No comparable evaluation fixtures')
     detailed=pd.DataFrame(evaluated)
