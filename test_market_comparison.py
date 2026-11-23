@@ -113,6 +113,13 @@ class TestLiveMarket(unittest.TestCase):
             self.assertFalse(state['independent_market_probability_validated'])
             self.assertIn('Sisal',board.bookmaker.values)
             self.assertTrue((board.n_others==3).all())
+            self.assertEqual(int(board.is_best_price_for_outcome.sum()),4)
+            best=board[board.is_best_price_for_outcome]
+            self.assertEqual(set(best.market),{'1','X','2'})
+            self.assertTrue((best.price==best.max_observed_quote).all())
+            report=(Path(temp)/'market_live_report.md').read_text()
+            self.assertIn('Migliore quota osservata',report)
+            self.assertIn('Tutte le quote disponibili',report)
 
     def test_duplicate_prices_raise_error(self):
         with self.assertRaisesRegex(ValueError,'Duplicate'):
