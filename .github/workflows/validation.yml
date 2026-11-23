@@ -8,6 +8,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: statistical-validation-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validation:
     runs-on: ubuntu-latest
