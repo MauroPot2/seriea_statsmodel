@@ -18,7 +18,7 @@ Il comando `sisal` tenta automaticamente di:
 1. Scaricare il PDF ufficiale **Calcio Base per Manifestazione** da Sisal.
 2. Estrarre calendario, squadre, 1X2, Under/Over 2,5 dalla sezione *ITA Serie A*.
 3. Verificare la data di aggiornamento stampata in fondo al PDF; **se è più vecchio di 48 ore, interrompere l'analisi**.
-4. Scaricare o aggiornare i CSV dei risultati di Serie A da Football-Data; se gli ultimi risultati sono troppo vecchi, produrre soltanto un report esplorativo, **senza candidate né puntate**.
+4. Scaricare i CSV storici da Football-Data e integrare soltanto risultati mancanti verificati dal feed secondario open-matchday. Se il confronto delle fonti o il calendario non torna, produrre soltanto un report esplorativo, **senza candidate né puntate**.
 5. Calcolare probabilità, quote eque, valore atteso (EV), probabilità del mercato senza margine e una eventuale puntata teorica.
 
 **Non devi compilare manualmente il CSV delle partite.**
@@ -29,6 +29,7 @@ In `seriea_data/` trovi:
 
 - `sisal_foglio_quote.pdf`: PDF scaricato da Sisal.
 - `sisal_quote_importate.csv`: gli incontri e le quote realmente estratti dal PDF.
+- `risultati_integrati_open_matchday.csv`: i soli risultati aggiunti dal feed secondario (vuoto quando non servono).
 - `sisal_analisi.csv`: tutti i mercati analizzati (comprese le scelte **NO_BET**). Se lo storico è vecchio e non siamo in una sosta verificata, ogni riga riporta `STORICO_DA_AGGIORNARE` e una puntata teorica di **0 EUR**.
 - `sisal_report.md`: il riepilogo leggibile delle sole candidate matematiche.
 
@@ -73,25 +74,32 @@ Il backtest esistente usa quote di Football-Data (soprattutto Bet365): **non rap
 Dati e riferimenti:
 - Foglio ufficiale Sisal: https://www.sisal.it/scommesse-matchpoint/foglio-quote
 - Fonte risultati storici: https://www.football-data.co.uk/italym.php
+- Feed secondario risultati 2026/27: https://github.com/oladeeayo/open-matchday (uso personale, non commerciale; attribuzione richiesta).
 - Dixon e Coles (1997), *Modelling Association Football Scores and Inefficiencies in the Football Betting Market*.
 
 ### Stato dei test
 
 I test automatizzati includono un **PDF artificiale** con la stessa disposizione delle colonne visibile nel documento ufficiale. In questo ambiente il download diretto del PDF reale Sisal non era disponibile, quindi la lettura di un PDF reale aggiornato non è stata verificata da qui. Il programma interrompe l'analisi in caso di formato imprevisto, dati scaduti o quote incomplete, anziché inventare previsioni.
 
-### Quando Football-Data non ha ancora aggiornato i risultati
+### Aggiornamento automatico dei risultati
 
-Il controllo riconosce la sosta delle nazionali **9–20 novembre 2026**: fino
-alla ripresa della Serie A il 21 novembre un intervallo superiore a nove giorni
-non è, da solo, un errore. Altre soste vanno aggiunte solo dopo verifica del
-calendario ufficiale.
+Il comando `sisal` usa Football-Data come fonte storica principale e consulta
+`open-matchday` per integrare eventuali risultati 2026/27 mancanti. Prima di
+aggiungerli controlla: squadre riconosciute, risultati non contraddittori,
+nessun duplicato, 10 incontri per giornata considerando partite giocate e
+future, assenza di incontri già iniziati senza risultato. Non sostituisce
+mai i risultati già presenti in Football-Data.
 
-Se lo storico risulta fermo, ad esempio all'8 novembre mentre sono già state
-giocate partite il 21–22 novembre, il programma **non deve proporre puntate**.
-La nuova versione stampa un avviso anziché terminare con traceback e salva
-comunque `sisal_analisi.csv` con ogni mercato contrassegnato
-`STORICO_DA_AGGIORNARE`, quota e valore atteso indicativi, ma puntata 0 EUR.
-Quando la fonte aggiornerà i risultati, basterà rieseguire il normale comando.
+Se il feed secondario non è disponibile o non supera i controlli, il report
+rimane **esplorativo**, con puntate a zero. Non si disattiva la protezione.
+Il feed è giornaliero e non live: durante una giornata in corso l'analisi può
+restare bloccata finché non vengono pubblicati i risultati.
 
-Per sostituire la versione precedente, estrai lo ZIP aggiornato nella
-stessa cartella: non è necessario reinstallare le dipendenze.
+Esegui sempre lo stesso comando:
+
+```bash
+python3 seriea_value_model.py sisal --bankroll 60
+```
+
+`--no-refresh` è destinato ai test offline: salta l'aggiornamento, dunque
+non va usato per analizzare quote attuali.
