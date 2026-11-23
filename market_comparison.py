@@ -351,6 +351,13 @@ def compare_live_snapshot(frame: pd.DataFrame, directory: Path) -> tuple[pd.Data
     board=board.sort_values(['market_price_premium','kickoff','home','market'],
                             ascending=[False,True,True,True],
                             na_position='last').reset_index(drop=True)
+    if not board.empty:
+        keys=['kickoff','home','away','market_group','market']
+        board['max_observed_quote']=board.groupby(keys).price.transform('max')
+        board['is_best_price_for_outcome']=board.price==board.max_observed_quote
+    else:
+        board['max_observed_quote']=pd.Series(dtype=float)
+        board['is_best_price_for_outcome']=pd.Series(dtype=bool)
     board.to_csv(directory/'market_live_comparison.csv',index=False)
     lines=[
         '# Comparazione quote raccolte da te',
@@ -364,9 +371,22 @@ def compare_live_snapshot(frame: pd.DataFrame, directory: Path) -> tuple[pd.Data
         'Scenario avverso = probabilità minima osservata negli altri '
         'bookmaker × quota - 1: non è un intervallo di confidenza.',
         '',
+        '## Migliore quota osservata per ogni esito',
+        '',
+        '| Partita | Esito | Bookmaker | Quota più alta | P consenso altri | Gap indicativo |',
+        '|---|---|---|---:|---:|---:|',
+    ]
+    for _,r in board[board.is_best_price_for_outcome].iterrows():
+        p=f'{r.p_market_loo:.1%}' if pd.notna(r.p_market_loo) else 'n/d'
+        gap=f'{r.market_price_premium:+.1%}' if pd.notna(r.market_price_premium) else 'n/d'
+        lines.append(f'| {r.home} - {r.away} | {r.market} | {r.bookmaker} | '
+                     f'{r.price:.2f} | {p} | {gap} |')
+    lines.extend(['',
+        '## Tutte le quote disponibili (anche quelle inferiori)',
+        '',
         '| Partita | Mercato | Fonte | Quota | P altri book | Gap indicativo | Altri book |',
         '|---|---|---|---:|---:|---:|---:|',
-    ]
+    ])
     for _,r in board.iterrows():
         p=f'{r.p_market_loo:.1%}' if pd.notna(r.p_market_loo) else 'n/d'
         gap=f'{r.market_price_premium:+.1%}' if pd.notna(r.market_price_premium) else 'n/d'
