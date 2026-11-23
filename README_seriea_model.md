@@ -17,6 +17,52 @@ The terminal prints the full odds board. `seriea_data/sisal_report.md` contains 
 
 **All Sisal stakes remain zero until separate validation on timestamped Sisal odds exists.** A Bet365 backtest cannot validate Sisal, and the report does not claim an investment edge.
 
+## Experimental xG + Elo (2026-11)
+
+Three **independent hypotheses** have been implemented and compared with bookmaker
+opening probabilities on the **same matches**:
+
+- Elo-only: ratings updated from actual match outcomes, in chronological date batches.
+- xG-only: recent, time-weighted expected goals for/against with shrinkage and home advantage.
+- xG+Elo: a fixed geometric combination of their expected-goal rates; no bookmaker prices in inputs.
+
+All coefficients are **fixed research hypotheses**, not fitted to make a historical ROI look high.
+The program reports log loss and Brier by season and an equal-fixture comparison; it does
+not select a winner based on retrospective profit.
+
+xG source: https://www.xgtables.io/understat-data/ republishes historical Understat
+match xG through 2025/26. Its 2026/27 figures are Sportmonks
+(https://www.xgtables.io/sources/), a DIFFERENT xG model.
+Team xG strength calculations therefore use matches from the **same season and provider**.
+No mean, total, or relative strength is mixed across sources.
+
+Usage:
+
+    python3 seriea_value_model.py xg-fetch
+    python3 seriea_value_model.py xg-backtest --start 2025-08-01
+    python3 seriea_value_model.py sisal --bankroll 60
+
+The first command downloads xG CSVs for 2023/24 through 2026/27, checks their
+structure, and reconciles each completed match against official scores by date,
+home team and away team. Conflicting scores **abort ingestion**; missing xG is
+excluded, never converted into zero or replaced with actual goals.
+
+The second command writes:
+
+- xg_elo_predictions.csv: every evaluated method and outcome, including errors.
+- xg_elo_metrics.csv: per-season accuracy metrics and sample sizes.
+- xg_elo_report.md: *same-match* comparison versus Bet365 opening prices.
+
+The Sisal report adds Elo and xG+Elo probabilities and a table of their
+**differences from Sisal**, not betting suggestions. If current-season xG coverage
+is inadequate, xG+Elo is shown as n/d and Elo remains visible. Data from the
+current match are NEVER used to predict it, even if a CSV was downloaded later.
+
+**Important:** the historical 2025/26 season was used during previous model
+development. Its new results are **retrospective** and must not be called a fresh
+untouched holdout. Independent prospective evaluation is required before any
+claim of predictive skill. A discrepancy in Sisal quotes does not establish value.
+
 ## Statistical evaluation
 
 The model now compares four distinct sets of probabilities:
