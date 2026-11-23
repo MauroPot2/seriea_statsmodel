@@ -45,8 +45,8 @@ class TestSisalAnalysis(TestCase):
         self.assertGreater(len(frame), 0)
         self.assertTrue((frame.Stato == 'STORICO_DA_AGGIORNARE').all())
         self.assertTrue((frame.PuntataTeorica == 0).all())
-        self.assertIn('REPORT ESPLORATIVO', report)
-        self.assertIn('NESSUNA PUNTATA PROPOSTA', output)
+        self.assertIn('AVVISO: storico incompleto', report)
+        self.assertIn('quote analizzate', output)
 
     def test_recent_history_still_requires_independent_sisal_validation(self):
         frame, report, output = self.run_analysis('2026-11-22')
@@ -54,8 +54,8 @@ class TestSisalAnalysis(TestCase):
         self.assertTrue((frame.QualitaStorico == 'OK').all())
         self.assertTrue((frame.Stato == 'NON_VALIDATO_SISAL').all())
         self.assertTrue((frame.PuntataTeorica == 0).all())
-        self.assertIn('mancano quote storiche Sisal', output)
-        self.assertNotIn('REPORT ESPLORATIVO', report)
+        self.assertIn('tutti gli esiti disponibili', output)
+        self.assertIn('Tutte le quote', report)
 
 
 class TestInternationalBreakFreshness(TestCase):
