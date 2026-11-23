@@ -64,7 +64,7 @@ class TestIndependentModels(TestCase):
         rows=[]
         measured=[]
         for i in range(330):
-            d=pd.Timestamp('2025-08-01')+pd.Timedelta(days=i//2)
+            d=pd.Timestamp('2025-08-01')+pd.Timedelta(days=i//3)
             h,a=teams[i%4],teams[(i+1)%4]
             rows.append(dict(Date=d,HomeTeam=h,AwayTeam=a,FTHG=2,FTAG=1))
             measured.append(dict(Date=d,HomeTeam=h,AwayTeam=a,
@@ -87,8 +87,10 @@ class TestIndependentModels(TestCase):
     def test_forecast_excludes_same_day_xg_even_if_larger(self):
         cutoff=pd.Timestamp('2025-12-01')
         first=forecast_asof(self.history,self.xg,cutoff,'A','B')
-        changed=self.xg.copy()
-        changed.loc[changed.Date>=cutoff,'XGH']=11.0
+        fake_future=self.xg.iloc[:4].copy()
+        fake_future['Date']=cutoff
+        fake_future['XGH']=11.0
+        changed=pd.concat([self.xg,fake_future],ignore_index=True)
         second=forecast_asof(self.history,changed,cutoff,'A','B')
         self.assertEqual(first['status'],second['status'])
         self.assertEqual(first['hybrid'],second['hybrid'])
