@@ -11,7 +11,11 @@ A Python research tool for estimating Serie A probabilities and comparing those 
     python3 seriea_value_model.py backtest --bankroll 60
     python3 seriea_value_model.py sisal --bankroll 60
 
-The Sisal command downloads a fresh official public price-sheet PDF, parses future Serie A matches, checks historical results, and writes a research report. An old PDF, unmatched teams or incomplete results block recommendations. **All Sisal stakes remain zero until a separate, prospective Sisal validation exists.** A Bet365 backtest alone cannot validate Sisal.
+The Sisal command downloads the official public price-sheet PDF and displays **all available Serie A 1X2 and Under/Over 2.5 odds**, even if the independent forecasting model is not validated. Each fixture is shown with the odds and **Sisal's implied probability after proportional margin removal**. Within each market, the highest implied probability is marked as the most likely outcome *according to the bookmaker*; 1X2 and U/O are ranked separately. The Poisson/Dixon–Coles probability is shown in a separate column for research, not promoted as more accurate.
+
+The terminal prints the full odds board. `seriea_data/sisal_report.md` contains a per-fixture summary and **all outcomes**; `seriea_data/sisal_analisi.csv` contains the ranked rows including original status and validation flags. Unrecognized teams still appear with bookmaker probabilities, but without an independent Poisson forecast. If the results feed is incomplete, odds are still listed and marked, while the model forecast is exploratory.
+
+**All Sisal stakes remain zero until separate validation on timestamped Sisal odds exists.** A Bet365 backtest cannot validate Sisal, and the report does not claim an investment edge.
 
 ## Statistical evaluation
 
@@ -38,7 +42,8 @@ Generated under the seriea_data directory:
 - backtest_bets.csv: all hypothetical wagers, including losses.
 - backtest_segments.csv: segmented results by market and odds range.
 - calibration_bins.csv: predicted versus observed frequencies by probability bucket.
-- sisal_analisi.csv: price-by-price current research output, including raw Dixon–Coles probabilities and market-anchored probabilities separately.
+- sisal_analisi.csv: **complete odds board**, rank within 1X2 and Under/Over, bookmaker implied probability no-vig and independent Poisson/Dixon–Coles probability in different columns.
+- sisal_report.md: all quoted outcomes plus a compact per-fixture table of the highest-probability outcome in each market (based on Sisal no-vig).
 - sisal_forecast_archive.csv: timestamped snapshots of predictions and quotes **observed before kickoff**.
 - sisal_audit_matches.csv: later scoring of completed Sisal fixtures already present in the snapshot archive.
 - risultati_integrati_open_matchday.csv: any missing results cross-checked against the secondary daily schedule.

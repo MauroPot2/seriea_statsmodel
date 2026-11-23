@@ -360,7 +360,7 @@ def sisal_analysis(pdf_path: Path | None, data_dir: Path, bankroll: float,
     """One-command public Sisal quote import + research report; never bets."""
     from sisal_import import (SisalImportError, parse_sisal_pdf,
                               check_freshness, download_sisal_pdf, OFFICIAL_PDF_URL)
-    from datetime import date
+    from sisal_reporting import rank_full_board, terminal_board, write_readable_report
 
     now=analysis_time or datetime.now(ZoneInfo('Europe/Rome')).replace(tzinfo=None)
     if pdf_path is None:
@@ -427,11 +427,14 @@ def sisal_analysis(pdf_path: Path | None, data_dir: Path, bankroll: float,
             continue
         home=normalized_team(event['HomeTeamSisal'],known)
         away=normalized_team(event['AwayTeamSisal'],known)
-        if home is None or away is None:
+        recognized = home is not None and away is not None
+        if not recognized:
             unrecognized.append(f"{event['HomeTeamSisal']} - {event['AwayTeamSisal']}")
-            continue
-        n1,n2=strength_counts(history,home,away)
-        raw_probs=model.probabilities(home,away)
+            n1 = n2 = 0
+            raw_probs = None
+        else:
+            n1,n2=strength_counts(history,home,away)
+            raw_probs=model.probabilities(home,away)
         odds={'1':event['OddsH'],'X':event['OddsD'],'2':event['OddsA']}
         if event['OddsOver25'] is not None and event['OddsUnder25'] is not None:
             odds.update({'OVER2.5':event['OddsOver25'],'UNDER2.5':event['OddsUnder25']})
@@ -439,29 +442,30 @@ def sisal_analysis(pdf_path: Path | None, data_dir: Path, bankroll: float,
         for outcomes in (('1','X','2'),('OVER2.5','UNDER2.5')):
             no_vig_probs.update(no_vig(odds,outcomes))
         # A good Bet365 backtest CANNOT certify Sisal odds.
-        probs=blend_probabilities(raw_probs, odds, profile['weights']) if profile else {
-            **raw_probs, **no_vig_probs}
-        candidate_markets={}  # No historical Sisal certification yet.
+        probs = (blend_probabilities(raw_probs, odds, profile['weights'])
+                 if raw_probs is not None and profile is not None else no_vig_probs)
         for market,price in odds.items():
             p=probs[market]
             ev=p*price-1
             edge=p-no_vig_probs[market]
-            bet = candidate_markets.get(market)
+            raw=raw_probs[market] if raw_probs is not None else float('nan')
             rows.append({
                 'Data':event['Date'], 'Ora':event['Time'],
                 'Partita':f'{event["HomeTeamSisal"]} - {event["AwayTeamSisal"]}',
-                'HomeTeam':home, 'AwayTeam':away,
+                'HomeTeam':home or event['HomeTeamSisal'],
+                'AwayTeam':away or event['AwayTeamSisal'],
                 'Mercato':market, 'QuotaSisal':round(price,3),
-                'ProbModello':round(p,5), 'ProbPoissonDC':round(raw_probs[market],5),
-                'EVPoissonDC':round(raw_probs[market]*price-1,5),
+                'ProbModello':round(p,5), 'ProbPoissonDC':round(raw,5),
+                'EVPoissonDC':round(raw*price-1,5),
                 'QuotaEqua':round(1/p,3),
                 'ProbMercatoNoVig':round(no_vig_probs[market],5),
                 'EV':round(ev,5), 'Edge':round(edge,5),
                 'CampioneCasa':n1,'CampioneOspite':n2,
                 'Stato':('STORICO_DA_AGGIORNARE' if history_stale else
+                         'SQUADRE_NON_RICONOSCIUTE' if not recognized else
                          'STORICO_INSUFFICIENTE' if min(n1,n2)<MIN_TEAM_MATCHES else
                          'NON_VALIDATO_SISAL'),
-                'PuntataTeorica':round(bankroll*bet['fraction'],4) if bet else 0.0,
+                'PuntataTeorica':0.0,
                 'AggiornamentoSisal':event['SisalUpdated'],
                 'UltimoRisultatoStorico':str(last_result.date()),
                 'QualitaStorico':'NON_AGGIORNATO' if history_stale else 'OK',
@@ -471,79 +475,33 @@ def sisal_analysis(pdf_path: Path | None, data_dir: Path, bankroll: float,
     if not rows:
         raise ValueError('Non ci sono partite future riconosciute da analizzare. '
                          'Controlla data del PDF, nomi delle squadre e palinsesto.')
-    report=pd.DataFrame(rows)
-    # For report presentation only, allow at most one selection per fixture.
-    chosen=set()
-    exposure=0.0
-    for idx in report.sort_values('EV',ascending=False).index:
-        row=report.loc[idx]
-        if row.Stato != 'CANDIDATA':
-            continue
-        key=(row.Data,row.Ora,row.Partita)
-        if key in chosen:
-            report.loc[idx,'Stato']='NO_BET_CORRELAZIONE'
-            report.loc[idx,'PuntataTeorica']=0.0
-            continue
-        chosen.add(key)
-        stake=min(float(row.PuntataTeorica), max(0,bankroll*.05-exposure))
-        if stake < .01:
-            report.loc[idx,'Stato']='NO_BET_LIMITE_ESPOSIZIONE'
-            report.loc[idx,'PuntataTeorica']=0.0
-        else:
-            report.loc[idx,'PuntataTeorica']=round(stake,2)
-            exposure+=stake
-    report=report.sort_values(['Stato','EV'],ascending=[True,False])
+    # Archive the original observations BEFORE adding presentation-only
+    # ranking fields, to preserve the existing audit schema.
+    from sisal_history import append_forecasts
+    report_before_ranking=pd.DataFrame(rows)
     data_dir.mkdir(exist_ok=True,parents=True)
-    original=pd.DataFrame(fixtures)
+    added_snapshots=append_forecasts(report_before_ranking,data_dir,now)
+    report=rank_full_board(report_before_ranking)
     quote_csv=data_dir/'sisal_quote_importate.csv'
     result_csv=data_dir/'sisal_analisi.csv'
     result_md=data_dir/'sisal_report.md'
-    original.to_csv(quote_csv,index=False)
+    pd.DataFrame(fixtures).to_csv(quote_csv,index=False)
     report.to_csv(result_csv,index=False)
-    from sisal_history import append_forecasts
-    added_snapshots=append_forecasts(report,data_dir,now)
-    print(f'Snapshot Sisal registrati prima del calcio di inizio: {added_snapshots}')
-    shortlisted=report[report.Stato=='CANDIDATA'].sort_values('EV',ascending=False)
-    fmt=lambda x:f'{x:.1%}'
-    with result_md.open('w',encoding='utf-8') as f:
-        f.write(f'# Analisi Serie A / Sisal\n\nPDF aggiornato: {updated:%d/%m/%Y %H:%M} '
-                f'(ora italiana). Analisi: {now:%d/%m/%Y %H:%M}.\n\n')
-        f.write(f'Fonte PDF: {OFFICIAL_PDF_URL}\n\n')
-        f.write(f'Ultimo risultato utilizzato: {last_result.date()} '
-                f'({stale_days} giorni prima dell’analisi).\n\n')
-        f.write(f'Controllo calendario: {freshness_reason}\n\n')
-        if history_stale:
-            f.write('**STORICO DA AGGIORNARE — REPORT ESPLORATIVO.** '
-                    'Le partite più recenti possono mancare: tutti i mercati hanno '
-                    'stato `STORICO_DA_AGGIORNARE` e **puntata teorica 0 EUR**. '
-                    'Non interpretare i valori EV come occasioni sfruttabili.\n\n')
-        f.write(f'Capitale ipotetico: {bankroll:.2f} EUR. '
-                'Max 1% a puntata e 5% totale esposto; mai puntata automatica.\n\n')
-        f.write('| Data | Partita | Esito | Quota | Prob. | EV | Puntata |\n')
-        f.write('|---|---|---|---:|---:|---:|---:|\n')
-        if shortlisted.empty:
-            f.write('| — | Nessuna puntata: storico Sisal non validato | — | — | — | — | 0,00 EUR |\n')
-        else:
-            for _,r in shortlisted.iterrows():
-                f.write(f'| {r.Data} {r.Ora} | {r.Partita} | {r.Mercato} | '
-                        f'{r.QuotaSisal:.2f} | {fmt(r.ProbModello)} | '
-                        f'{fmt(r.EV)} | {r.PuntataTeorica:.2f} EUR |\n')
-        f.write('\n**Stato:** quote storiche Sisal non disponibili per una validazione '
-                'fuori campione: puntate sempre 0 EUR. Le probabilità stimate '
-                'non dimostrano un rendimento positivo.\n')
-        if unrecognized:
-            f.write('\nPartite non elaborate per squadre sconosciute: '
-                    +'; '.join(sorted(set(unrecognized)))+'\n')
+    write_readable_report(report,result_md,updated=updated,now=now,
+                          source_url=OFFICIAL_PDF_URL,last_result=last_result,
+                          freshness_reason=freshness_reason,history_stale=history_stale,
+                          unrecognized=unrecognized)
+
     print(f'\nSISAL: aggiornato {updated:%d/%m/%Y %H:%M}; partite PDF {len(fixtures)}; '
-          f'partite iniziate {skipped_past}; mercati analizzati {len(report)}')
+          f'partite iniziate {skipped_past}; quote analizzate {len(report)}')
+    print(terminal_board(report))
     if unrecognized:
-        print('ATTENZIONE squadre non riconosciute (nessuna previsione): '+ '; '.join(unrecognized))
-    if history_stale:
-        print('NESSUNA PUNTATA PROPOSTA: storico non aggiornato, report solo esplorativo.')
-    else:
-        print('NESSUNA PUNTATA PROPOSTA: mancano quote storiche Sisal per validazione indipendente.')
-    print(f'\nQuote: {quote_csv}\nAnalisi completa: {result_csv}\nReport leggibile: {result_md}')
-    print('IMPORTANTE: validare il modello fuori campione prima di usare denaro reale.')
+        print('ATTENZIONE: squadre sconosciute per il modello DC, '
+              'quote Sisal comunque riportate: ' + '; '.join(sorted(set(unrecognized))))
+    print(f'\nNuovi snapshot registrati prima del calcio d’inizio: {added_snapshots}')
+    print(f'Quote: {quote_csv}\nGraduatoria completa: {result_csv}\nReport leggibile: {result_md}')
+    print('Le probabilità di Sisal non dimostrano valore economico; '
+          'nessuna puntata consigliata.')
 
 
 def main() -> None:

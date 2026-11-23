@@ -1,6 +1,9 @@
 name: Statistical validation
 
 on:
+  push:
+    branches:
+      - 'feat/sisal-complete-probability-report'
   pull_request:
   workflow_dispatch:
 
