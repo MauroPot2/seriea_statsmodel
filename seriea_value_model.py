@@ -415,19 +415,34 @@ def sisal_analysis(pdf_path: Path | None, data_dir: Path, bankroll: float,
             needed.append(latest_season)
         fetch(needed,data_dir)
     df=read_history(data_dir)
+    sync_error = None
+    sync_reason = None
+    if not no_refresh:
+        from results_sync import sync_results, ResultSyncError
+        try:
+            df, sync_reason = sync_results(df, now, data_dir)
+            print(f'RISULTATI INTEGRATI: {sync_reason}')
+        except ResultSyncError as exc:
+            sync_error = str(exc)
+            print(f'ATTENZIONE: integrazione risultati non verificata: {exc}', file=sys.stderr)
     as_of=pd.Timestamp(now.date())
     history=df[df.Date < as_of]
     if len(history)<MIN_HISTORY:
         raise ValueError(f'Risultati insufficienti per il modello: {len(history)} (<{MIN_HISTORY}).')
     last_result=history.Date.max()
     stale_days=(as_of-last_result).days
-    history_is_fresh, freshness_reason = history_freshness(last_result, now)
+    if no_refresh:
+        history_is_fresh, freshness_reason = history_freshness(last_result, now)
+    else:
+        history_is_fresh = sync_error is None and sync_reason is not None
+        freshness_reason = sync_reason if history_is_fresh else (
+            'Controllo completo non riuscito: ' + (sync_error or 'fonte secondaria indisponibile'))
     history_stale=not history_is_fresh
     if history_is_fresh and stale_days > 9:
         print(f'STO RICONOSCENDO UNA SOSTA: {freshness_reason}')
     if history_stale:
         print(
-            f'ATTENZIONE: storico Football-Data fermo al {last_result.date()} '
+            f'ATTENZIONE: ultimo risultato verificabile al {last_result.date()} '
             f'({stale_days} giorni fa). Creo un report ESPLORATIVO, '
             'senza candidate e senza puntate. Aggiorna lo storico prima di utilizzarlo.',
             file=sys.stderr,
@@ -516,7 +531,7 @@ def sisal_analysis(pdf_path: Path | None, data_dir: Path, bankroll: float,
         f.write(f'# Analisi Serie A / Sisal\n\nPDF aggiornato: {updated:%d/%m/%Y %H:%M} '
                 f'(ora italiana). Analisi: {now:%d/%m/%Y %H:%M}.\n\n')
         f.write(f'Fonte PDF: {OFFICIAL_PDF_URL}\n\n')
-        f.write(f'Ultimo risultato Football-Data: {last_result.date()} '
+        f.write(f'Ultimo risultato utilizzato: {last_result.date()} '
                 f'({stale_days} giorni prima dell’analisi).\n\n')
         f.write(f'Controllo calendario: {freshness_reason}\n\n')
         if history_stale:
