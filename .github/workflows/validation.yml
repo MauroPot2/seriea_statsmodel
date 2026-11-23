@@ -5,6 +5,7 @@ on:
     branches:
       - 'feat/sisal-complete-probability-report'
       - 'feat/xg-elo-model'
+      - 'feat/market-consensus-value-audit'
   pull_request:
   workflow_dispatch:
 
@@ -31,6 +32,8 @@ jobs:
         run: python seriea_value_model.py xg-fetch | tee xg_fetch_stdout.txt
       - name: Compare xG Elo hypotheses on real historical data
         run: python seriea_value_model.py xg-backtest --start 2025-08-01 | tee xg_elo_stdout.txt
+      - name: Evaluate historical bookmaker opening-odds consensus
+        run: python seriea_value_model.py market-backtest --start 2025-08-01 | tee market_stdout.txt
       - name: Archive ALL outcomes
         if: always()
         uses: actions/upload-artifact@v4
@@ -39,6 +42,10 @@ jobs:
           if-no-files-found: warn
           path: |
             holdout_stdout.txt
+            market_stdout.txt
+            seriea_data/market_historical_report.md
+            seriea_data/market_historical_prices.csv
+            seriea_data/market_historical_scores.csv
             xg_fetch_stdout.txt
             xg_elo_stdout.txt
             seriea_data/xg_elo_report.md

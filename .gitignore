@@ -16,3 +16,8 @@ seriea_data/xg_seriea_*.csv
 seriea_data/xg_elo_predictions.csv
 seriea_data/xg_elo_metrics.csv
 seriea_data/xg_elo_report.md
+seriea_data/market_historical_prices.csv
+seriea_data/market_historical_scores.csv
+seriea_data/market_historical_report.md
+seriea_data/market_live_comparison.csv
+seriea_data/market_live_report.md
