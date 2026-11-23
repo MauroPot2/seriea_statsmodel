@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
+from scipy.optimize import minimize, minimize_scalar
 from scipy.special import gammaln
 from scipy.stats import poisson
 
@@ -105,25 +105,33 @@ def read_history(directory: Path) -> pd.DataFrame:
     return data.sort_values(['Date','HomeTeam']).reset_index(drop=True)
 
 
-def odds_from_row(row: pd.Series) -> dict[str, float]:
-    # Never mix closing and opening prices within the same 1X2 or O/U market.
+def odds_from_row(row: pd.Series, *, price_kind: str = 'opening') -> dict[str, float]:
+    """Complete market snapshots, never mixed between opening and closing.
+
+    Opening prices are reproducible benchmarks, but executability is not proven.
+    """
+    if price_kind not in {'opening', 'closing'}:
+        raise ValueError('price_kind must be opening or closing')
+
     def get(col: str) -> float | None:
         value = pd.to_numeric(row.get(col), errors='coerce')
-        return float(value) if pd.notna(value) and float(value) > 1.0 else None
+        return float(value) if pd.notna(value) and np.isfinite(value) and float(value)>1 else None
 
+    if price_kind == 'opening':
+        markets = [
+            (('1', 'X', '2'), ('B365H', 'B365D', 'B365A')),
+            (('OVER2.5', 'UNDER2.5'), ('B365>2.5', 'B365<2.5')),
+        ]
+    else:
+        markets = [
+            (('1', 'X', '2'), ('B365CH', 'B365CD', 'B365CA')),
+            (('OVER2.5', 'UNDER2.5'), ('B365C>2.5', 'B365C<2.5')),
+        ]
     odds: dict[str, float] = {}
-    markets = [
-        (('1', 'X', '2'),
-         [('B365CH', 'B365CD', 'B365CA'), ('B365H', 'B365D', 'B365A')]),
-        (('OVER2.5', 'UNDER2.5'),
-         [('B365C>2.5', 'B365C<2.5'), ('B365>2.5', 'B365<2.5')]),
-    ]
-    for labels, versions in markets:
-        for columns in versions:
-            values = [get(col) for col in columns]
-            if all(value is not None for value in values):
-                odds.update(zip(labels, values))
-                break
+    for names, cols in markets:
+        values = [get(col) for col in cols]
+        if all(value is not None for value in values):
+            odds.update(zip(names, values))
     return odds
 
 
@@ -142,6 +150,7 @@ class Model:
     defense: np.ndarray
     home_base: float
     away_base: float
+    rho: float = 0.0  # Dixon-Coles low-score parameter learned from older results.
 
     def goals(self, home: str, away: str) -> tuple[float,float]:
         lookup = {name: idx for idx,name in enumerate(self.names)}
@@ -151,11 +160,22 @@ class Model:
         dh = float(self.defense[lookup[home]]) if home in lookup else 0.0
         return float(np.exp(self.home_base + ah - da)), float(np.exp(self.away_base + aa - dh))
 
-    def probabilities(self, home: str, away: str) -> dict[str,float]:
+    def probabilities(self, home: str, away: str, *, dc: bool = True) -> dict[str,float]:
         lh, la = self.goals(home, away)
         axis = np.arange(GOAL_LIMIT + 1)
         scores = np.outer(poisson.pmf(axis, lh), poisson.pmf(axis, la))
-        scores /= scores.sum()  # Renormalise negligible truncated tails.
+        # Dixon-Coles correction only for the 0/1 score combinations.
+        if dc and self.rho:
+            rho = self.rho
+            scores[0, 0] *= 1.0 - lh * la * rho
+            scores[0, 1] *= 1.0 + lh * rho
+            scores[1, 0] *= 1.0 + la * rho
+            scores[1, 1] *= 1.0 - rho
+        if not np.isfinite(scores).all() or (scores < 0).any():
+            raise ValueError('Invalid Dixon-Coles score distribution')
+        if poisson.sf(GOAL_LIMIT, lh) > 0.001 or poisson.sf(GOAL_LIMIT, la) > 0.001:
+            raise ValueError('Poisson grid truncates too much probability mass')
+        scores /= scores.sum()
         gh, ga = np.indices(scores.shape)
         return {
             '1': float(scores[gh > ga].sum()),
@@ -209,8 +229,30 @@ def fit(history: pd.DataFrame, as_of: pd.Timestamp) -> Model:
     if not solution.success and np.linalg.norm(solution.jac) > 0.1:
         raise RuntimeError(f'Optimizer did not converge: {solution.message}')
     x = solution.x
-    return Model(names, x[:n]-x[:n].mean(), x[n:2*n]-x[n:2*n].mean(),
-                 float(x[-2]), float(x[-1]))
+    fitted = Model(names, x[:n]-x[:n].mean(), x[n:2*n]-x[n:2*n].mean(),
+                   float(x[-2]), float(x[-1]))
+    # Two-stage *conditional* Dixon-Coles fit, not a joint MLE.
+    # Attacking/defensive strengths above are fitted without this correction;
+    # low-score rho is then estimated from strictly prior matches.
+    h_log = x[-2] + fitted.attack[home_ix] - fitted.defense[away_ix]
+    a_log = x[-1] + fitted.attack[away_ix] - fitted.defense[home_ix]
+    lh, la = np.exp(h_log), np.exp(a_log)
+    low = (goals_h <= 1) & (goals_a <= 1)
+    if low.sum() >= 25:
+        h, a, gh, ga, w = lh[low], la[low], goals_h[low], goals_a[low], weight[low]
+        lower = max(-0.15, -0.95 / max(float(lh.max()), float(la.max())))
+        upper = min(0.15, 0.95 / max(float((lh * la).max()), 1.0))
+        if lower < upper:
+            def dc_objective(rho: float) -> float:
+                tau = np.where((gh==0) & (ga==0), 1-h*a*rho,
+                      np.where((gh==0) & (ga==1), 1+h*rho,
+                      np.where((gh==1) & (ga==0), 1+a*rho, 1-rho)))
+                return float(-(w*np.log(tau)).sum() + 20.0*rho*rho)
+            result = minimize_scalar(dc_objective, bounds=(lower, upper),
+                                     method='bounded', options={'xatol':1e-6})
+            if result.success and np.isfinite(result.fun):
+                fitted.rho = float(result.x)
+    return fitted
 
 
 def qualify(probs: dict[str,float], odds: dict[str,float]) -> list[dict]:
@@ -244,86 +286,10 @@ def strength_counts(history: pd.DataFrame, home: str, away: str) -> tuple[int,in
             int(((history.HomeTeam==away)|(history.AwayTeam==away)).sum()))
 
 
-def backtest(df: pd.DataFrame, start: pd.Timestamp, bankroll: float) -> None:
-    days = sorted(df[df.Date >= start].Date.unique())
-    predictions = []
-    decisions = []
-    capital = bankroll
-    peak = bankroll
-    drawdown = 0.0
-    fit_count = 0
-    for date in days:
-        date = pd.Timestamp(date)
-        history = df[df.Date < date]
-        if len(history) < MIN_HISTORY:
-            continue
-        model = fit(history, date)
-        fit_count += 1
-        for _, row in df[df.Date == date].iterrows():
-            odds = odds_from_row(row)
-            reference = no_vig(odds, ('1','X','2'))
-            if not reference:
-                continue
-            p = model.probabilities(str(row.HomeTeam), str(row.AwayTeam))
-            outcome = '1' if row.FTHG>row.FTAG else ('X' if row.FTHG==row.FTAG else '2')
-            vector = np.array([p[k] for k in ('1','X','2')])
-            market = np.array([reference[k] for k in ('1','X','2')])
-            truth = np.array([float(k==outcome) for k in ('1','X','2')])
-            predictions.append({
-                'date':date, 'home':row.HomeTeam, 'away':row.AwayTeam,
-                'model_ll': -math.log(max(p[outcome],1e-9)),
-                'market_ll': -math.log(max(reference[outcome],1e-9)),
-                'model_brier': float(np.square(vector-truth).sum()),
-                'market_brier': float(np.square(market-truth).sum()),
-            })
-            n_home,n_away = strength_counts(history,str(row.HomeTeam),str(row.AwayTeam))
-            if min(n_home,n_away) < MIN_TEAM_MATCHES:
-                continue
-            choices = qualify(p,odds)
-            if not choices or capital<=0:
-                continue
-            selected = choices[0]  # only one, to avoid correlated selections per fixture
-            stake = capital * selected['fraction']
-            if stake < 0.001:
-                continue
-            won = actual_winner(row,selected['market'])
-            profit = stake*(selected['odds']-1) if won else -stake
-            capital += profit
-            peak = max(peak, capital)
-            drawdown = max(drawdown, (peak-capital)/peak)
-            decisions.append({'date':str(date.date()),'home':row.HomeTeam,'away':row.AwayTeam,
-                              'market':selected['market'], 'prob':selected['prob'],
-                              'odds':selected['odds'], 'ev':selected['ev'],
-                              'stake':stake,'won':won,'profit':profit,'capital':capital,
-                              'unit_return': (selected['odds']-1) if won else -1.0})
-    if not predictions:
-        print('No evaluable matches. Check start date and available historical seasons.')
-        return
-    m = pd.DataFrame(predictions)
-    print(f'\nOUT-OF-SAMPLE from {start.date()} | {len(m)} scored matches | {fit_count} daily model fits')
-    print(f'Mean log loss (lower is better): model {m.model_ll.mean():.4f}, market {m.market_ll.mean():.4f}')
-    print(f'Mean Brier (lower is better): model {m.model_brier.mean():.4f}, market {m.market_brier.mean():.4f}')
-    print(f'Qualification rules: EV >= {MIN_EV:.0%}, model probability >= no-vig market + {MIN_NO_VIG_EDGE:.0%}, at least {MIN_TEAM_MATCHES} matches/team')
-    if not decisions:
-        print('NO BETS qualified (the correct outcome may be zero bets).')
-        return
-    bets = pd.DataFrame(decisions)
-    staked = bets.stake.sum()
-    profit = bets.profit.sum()
-    print(f'Candidate bets: {len(bets)} | win rate: {bets.won.mean():.1%} | total stakes: €{staked:.2f}')
-    print(f'Net result: €{profit:+.2f} | ROI on stakes: {profit/staked:+.1%} | final simulated bankroll: €{capital:.2f}')
-    print(f'Maximum drawdown: {drawdown:.1%}')
-    # Non-parametric bootstrap of equal-stake unit returns (descriptive, not certainty).
-    if len(bets)>=20:
-        rng=np.random.default_rng(2026)
-        rr=bets.unit_return.to_numpy()
-        ci=np.quantile(rng.choice(rr,size=(3000,len(rr)),replace=True).mean(axis=1),[0.025,0.975])
-        print(f'95% bootstrap interval for equal-stake ROI (approx.): [{ci[0]:+.1%}, {ci[1]:+.1%}]')
-    output=DATA_DIR/'backtest_bets.csv'
-    output.parent.mkdir(parents=True,exist_ok=True)
-    bets.to_csv(output,index=False)
-    print(f'Full log: {output}')
-    print('Reminder: retrospective closing odds may not have been accessible at that price; past ROI is not a forecast.')
+def backtest(df: pd.DataFrame, start: pd.Timestamp, bankroll: float,
+             directory: Path = DATA_DIR) -> None:
+    from model_evaluation import run_validation
+    run_validation(df, start, bankroll, directory)
 
 
 def predict(df: pd.DataFrame, fixtures_path: Path, as_of: pd.Timestamp, bankroll: float) -> None:
@@ -358,9 +324,9 @@ def predict(df: pd.DataFrame, fixtures_path: Path, as_of: pd.Timestamp, bankroll
             print('NO BET: insufficient team history / new promotion')
         elif choices:
             best=choices[0]
-            print(f"CANDIDATE (not assured): {best['market']} @ {best['odds']:.2f} | "
-                  f"prob {best['prob']:.1%}, EV {best['ev']:+.1%}, "
-                  f"vs no-vig {best['edge']:+.1%}, 1/4 Kelly capped stake €{bankroll*best['fraction']:.2f}")
+            print(f"RESEARCH ONLY (not Sisal-validated): {best['market']} @ {best['odds']:.2f} | "
+                  f"raw Poisson-DC probability {best['prob']:.1%}, "
+                  f"raw EV {best['ev']:+.1%}; stake €0.00")
         else:
             print('NO BET: no selection meets both EV and probability-edge gates')
 
@@ -447,7 +413,9 @@ def sisal_analysis(pdf_path: Path | None, data_dir: Path, bankroll: float,
             'senza candidate e senza puntate. Aggiorna lo storico prima di utilizzarlo.',
             file=sys.stderr,
         )
+    from model_evaluation import load_validation_profile, blend_probabilities
     model=fit(history,as_of)
+    profile=load_validation_profile(data_dir)
     known=set(model.names)
     rows=[]
     unrecognized=[]
@@ -463,15 +431,17 @@ def sisal_analysis(pdf_path: Path | None, data_dir: Path, bankroll: float,
             unrecognized.append(f"{event['HomeTeamSisal']} - {event['AwayTeamSisal']}")
             continue
         n1,n2=strength_counts(history,home,away)
-        probs=model.probabilities(home,away)
+        raw_probs=model.probabilities(home,away)
         odds={'1':event['OddsH'],'X':event['OddsD'],'2':event['OddsA']}
         if event['OddsOver25'] is not None and event['OddsUnder25'] is not None:
             odds.update({'OVER2.5':event['OddsOver25'],'UNDER2.5':event['OddsUnder25']})
         no_vig_probs={}
         for outcomes in (('1','X','2'),('OVER2.5','UNDER2.5')):
             no_vig_probs.update(no_vig(odds,outcomes))
-        candidates=qualify(probs,odds) if not history_stale and min(n1,n2)>=MIN_TEAM_MATCHES else []
-        candidate_markets={x['market']:x for x in candidates}
+        # A good Bet365 backtest CANNOT certify Sisal odds.
+        probs=blend_probabilities(raw_probs, odds, profile['weights']) if profile else {
+            **raw_probs, **no_vig_probs}
+        candidate_markets={}  # No historical Sisal certification yet.
         for market,price in odds.items():
             p=probs[market]
             ev=p*price-1
@@ -480,18 +450,23 @@ def sisal_analysis(pdf_path: Path | None, data_dir: Path, bankroll: float,
             rows.append({
                 'Data':event['Date'], 'Ora':event['Time'],
                 'Partita':f'{event["HomeTeamSisal"]} - {event["AwayTeamSisal"]}',
+                'HomeTeam':home, 'AwayTeam':away,
                 'Mercato':market, 'QuotaSisal':round(price,3),
-                'ProbModello':round(p,5), 'QuotaEqua':round(1/p,3),
+                'ProbModello':round(p,5), 'ProbPoissonDC':round(raw_probs[market],5),
+                'EVPoissonDC':round(raw_probs[market]*price-1,5),
+                'QuotaEqua':round(1/p,3),
                 'ProbMercatoNoVig':round(no_vig_probs[market],5),
                 'EV':round(ev,5), 'Edge':round(edge,5),
                 'CampioneCasa':n1,'CampioneOspite':n2,
                 'Stato':('STORICO_DA_AGGIORNARE' if history_stale else
-                         'CANDIDATA' if bet else
-                         'STORICO_INSUFFICIENTE' if min(n1,n2)<MIN_TEAM_MATCHES else 'NO_BET'),
+                         'STORICO_INSUFFICIENTE' if min(n1,n2)<MIN_TEAM_MATCHES else
+                         'NON_VALIDATO_SISAL'),
                 'PuntataTeorica':round(bankroll*bet['fraction'],4) if bet else 0.0,
                 'AggiornamentoSisal':event['SisalUpdated'],
                 'UltimoRisultatoStorico':str(last_result.date()),
                 'QualitaStorico':'NON_AGGIORNATO' if history_stale else 'OK',
+                'ValidazioneSisal':'ASSENTE',
+                'FonteProbabilita':'Pool_Bet365_NON_VALIDATO_SISAL' if profile else 'MercatoSisalNoVig',
             })
     if not rows:
         raise ValueError('Non ci sono partite future riconosciute da analizzare. '
@@ -525,6 +500,9 @@ def sisal_analysis(pdf_path: Path | None, data_dir: Path, bankroll: float,
     result_md=data_dir/'sisal_report.md'
     original.to_csv(quote_csv,index=False)
     report.to_csv(result_csv,index=False)
+    from sisal_history import append_forecasts
+    added_snapshots=append_forecasts(report,data_dir,now)
+    print(f'Snapshot Sisal registrati prima del calcio di inizio: {added_snapshots}')
     shortlisted=report[report.Stato=='CANDIDATA'].sort_values('EV',ascending=False)
     fmt=lambda x:f'{x:.1%}'
     with result_md.open('w',encoding='utf-8') as f:
@@ -544,15 +522,15 @@ def sisal_analysis(pdf_path: Path | None, data_dir: Path, bankroll: float,
         f.write('| Data | Partita | Esito | Quota | Prob. | EV | Puntata |\n')
         f.write('|---|---|---|---:|---:|---:|---:|\n')
         if shortlisted.empty:
-            f.write('| — | Nessuna scommessa supera i filtri | — | — | — | — | — |\n')
+            f.write('| — | Nessuna puntata: storico Sisal non validato | — | — | — | — | 0,00 EUR |\n')
         else:
             for _,r in shortlisted.iterrows():
                 f.write(f'| {r.Data} {r.Ora} | {r.Partita} | {r.Mercato} | '
                         f'{r.QuotaSisal:.2f} | {fmt(r.ProbModello)} | '
                         f'{fmt(r.EV)} | {r.PuntataTeorica:.2f} EUR |\n')
-        f.write('\n**Attenzione:** le quote possono cambiare; il modello non è '
-                'validato su storico Sisal. EV stimato non significa profitto garantito. '
-                'Non aumentare la puntata al minimo richiesto dal bookmaker.\n')
+        f.write('\n**Stato:** quote storiche Sisal non disponibili per una validazione '
+                'fuori campione: puntate sempre 0 EUR. Le probabilità stimate '
+                'non dimostrano un rendimento positivo.\n')
         if unrecognized:
             f.write('\nPartite non elaborate per squadre sconosciute: '
                     +'; '.join(sorted(set(unrecognized)))+'\n')
@@ -562,14 +540,8 @@ def sisal_analysis(pdf_path: Path | None, data_dir: Path, bankroll: float,
         print('ATTENZIONE squadre non riconosciute (nessuna previsione): '+ '; '.join(unrecognized))
     if history_stale:
         print('NESSUNA PUNTATA PROPOSTA: storico non aggiornato, report solo esplorativo.')
-    elif shortlisted.empty:
-        print('NESSUNA CANDIDATA. Non è necessario fare scommesse.')
     else:
-        print('\nCANDIDATE TEORICHE (non validate contro Sisal):')
-        for _,r in shortlisted.iterrows():
-            print(f'{r.Data} {r.Ora} | {r.Partita:<32} {r.Mercato:<9} '
-                  f'@ {r.QuotaSisal:.2f} | P {r.ProbModello:.1%} | '
-                  f'EV {r.EV:+.1%} | puntata {r.PuntataTeorica:.2f} EUR')
+        print('NESSUNA PUNTATA PROPOSTA: mancano quote storiche Sisal per validazione indipendente.')
     print(f'\nQuote: {quote_csv}\nAnalisi completa: {result_csv}\nReport leggibile: {result_md}')
     print('IMPORTANTE: validare il modello fuori campione prima di usare denaro reale.')
 
@@ -580,9 +552,10 @@ def main() -> None:
     sub=parser.add_subparsers(dest='command',required=True)
     s=sub.add_parser('fetch',help='Download historical Serie A CSV seasons')
     s.add_argument('--seasons',nargs='+',default=SEASONS)
-    s=sub.add_parser('backtest',help='Walk-forward evaluation, no future leakage')
+    s=sub.add_parser('backtest',help='Walk-forward calibration and locked holdout')
     s.add_argument('--start',default='2025-08-01')
     s.add_argument('--bankroll',type=float,default=60.0)
+    s=sub.add_parser('sisal-audit',help='Audit logged Sisal odds vs final scores')
     s=sub.add_parser('predict',help='Predict user-entered fixtures and current odds')
     s.add_argument('--fixtures',type=Path,required=True)
     s.add_argument('--as-of',default=None,help='YYYY-MM-DD; defaults to local today')
@@ -601,7 +574,11 @@ def main() -> None:
         return
     df=read_history(args.data_dir)
     if args.command=='backtest':
-        backtest(df,pd.Timestamp(args.start),args.bankroll)
+        backtest(df,pd.Timestamp(args.start),args.bankroll,args.data_dir)
+    elif args.command=='sisal-audit':
+        import json
+        from sisal_history import audit_history
+        print(json.dumps(audit_history(df,args.data_dir),ensure_ascii=False,indent=2))
     else:
         as_of=pd.Timestamp(args.as_of).normalize() if args.as_of else pd.Timestamp.today().normalize()
         predict(df,args.fixtures,as_of,args.bankroll)
