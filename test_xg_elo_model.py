@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from xg_elo_model import (XGDataError, load_xg, forecast_asof,
-                          elo_ratings, _score_probs, PROVIDERS)
+                          elo_ratings, update_elo_day, _score_probs, PROVIDERS)
 
 
 class TestXGProvenance(TestCase):
@@ -77,6 +77,19 @@ class TestIndependentModels(TestCase):
         probs=_score_probs(1.9,1.0)
         self.assertAlmostEqual(sum(probs[k] for k in ('1','X','2')),1.)
         self.assertAlmostEqual(probs['OVER2.5']+probs['UNDER2.5'],1.)
+
+    def test_incremental_elo_identical_to_full_replay(self):
+        ratings={}
+        for _,day in self.history.groupby('Date',sort=True):
+            update_elo_day(ratings,day)
+        full=elo_ratings(self.history)
+        for team in full:
+            self.assertAlmostEqual(ratings[team],full[team],places=10)
+        cutoff=pd.Timestamp('2025-12-01')
+        first=forecast_asof(self.history,self.xg,cutoff,'A','B')
+        cached=forecast_asof(self.history,self.xg,cutoff,'A','B',
+                             _precomputed_ratings=ratings)
+        self.assertEqual(first['elo'],cached['elo'])
 
     def test_elo_is_updated_without_same_day_order_dependency(self):
         sample=self.history.iloc[:2].copy()
