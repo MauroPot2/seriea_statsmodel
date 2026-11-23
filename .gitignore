@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# Already committed input files cannot be retroactively ignored.
+seriea_data/sisal_forecast_archive.csv
+seriea_data/sisal_audit_matches.csv
+seriea_data/validation_profile.json
+seriea_data/validation_report.md
+seriea_data/backtest_predictions.csv
+seriea_data/backtest_bets.csv
+seriea_data/backtest_segments.csv
+seriea_data/calibration_bins.csv
