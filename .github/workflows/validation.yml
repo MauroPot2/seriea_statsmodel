@@ -4,13 +4,18 @@ on:
   push:
     branches:
       - 'feat/sisal-complete-probability-report'
+      - 'feat/xg-elo-model'
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: statistical-validation-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   validation:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -22,6 +27,10 @@ jobs:
         run: python -m unittest discover -p 'test_*.py' -v
       - name: Reproduce historical holdout
         run: python seriea_value_model.py backtest --start 2025-08-01 --bankroll 60 | tee holdout_stdout.txt
+      - name: Verify and reconcile xG source feeds
+        run: python seriea_value_model.py xg-fetch | tee xg_fetch_stdout.txt
+      - name: Compare xG Elo hypotheses on real historical data
+        run: python seriea_value_model.py xg-backtest --start 2025-08-01 | tee xg_elo_stdout.txt
       - name: Archive ALL outcomes
         if: always()
         uses: actions/upload-artifact@v4
@@ -30,6 +39,11 @@ jobs:
           if-no-files-found: warn
           path: |
             holdout_stdout.txt
+            xg_fetch_stdout.txt
+            xg_elo_stdout.txt
+            seriea_data/xg_elo_report.md
+            seriea_data/xg_elo_metrics.csv
+            seriea_data/xg_elo_predictions.csv
             seriea_data/validation_report.md
             seriea_data/validation_profile.json
             seriea_data/backtest_predictions.csv

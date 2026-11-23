@@ -44,5 +44,20 @@ class TestSisalHistory(TestCase):
         self.assertEqual(result['groups']['OU25']['n'],1)
         self.assertNotIn('roi',result)
 
+    def test_adding_new_forecast_columns_preserves_earlier_snapshots(self):
+        append_forecasts(self.report,self.path,self.now)
+        stored_before=pd.read_csv(self.path/'sisal_forecast_archive.csv')
+        new=self.report.copy()
+        new['AggiornamentoSisal']='2026-11-22T15:00'
+        new['ProbXGElo']=0.42
+        appended=append_forecasts(new,self.path,datetime(2026,11,22,16))
+        self.assertEqual(appended,5)
+        after=pd.read_csv(self.path/'sisal_forecast_archive.csv')
+        self.assertEqual(len(after),10)
+        self.assertTrue(after.iloc[:5].ProbXGElo.isna().all())
+        self.assertTrue((after.iloc[5:].ProbXGElo==0.42).all())
+        self.assertTrue((stored_before.ProbModello.to_numpy() ==
+                         after.iloc[:5].ProbModello.to_numpy()).all())
+
     def test_empty_archive(self):
         self.assertEqual(audit_history(pd.DataFrame(),self.path)['n_matches'],0)

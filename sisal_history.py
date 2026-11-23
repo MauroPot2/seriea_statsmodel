@@ -29,8 +29,12 @@ def append_forecasts(report: pd.DataFrame, directory: Path, now: datetime) -> in
         existing=pd.read_csv(path,dtype=str)
         if not set(KEYS).issubset(existing.columns):
             raise ValueError('Archivio Sisal esistente con colonne incompatibili')
-        if not set(candidate.columns).issubset(existing.columns):
-            raise ValueError('Archivio Sisal precedente privo di colonne correnti')
+        # Schema evolution: older snapshots retain their original values.
+        # Newly introduced independent forecasts remain missing on old rows,
+        # never retroactively recomputed from results known later.
+        for column in candidate.columns:
+            if column not in existing.columns:
+                existing[column] = pd.NA
         keys=set(tuple(rec) for rec in existing[KEYS].itertuples(index=False,name=None))
         candidate=candidate.loc[[tuple(rec) not in keys for rec in
                                  candidate[KEYS].itertuples(index=False,name=None)]]

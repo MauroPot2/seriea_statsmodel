@@ -11,3 +11,8 @@ seriea_data/backtest_predictions.csv
 seriea_data/backtest_bets.csv
 seriea_data/backtest_segments.csv
 seriea_data/calibration_bins.csv
+
+seriea_data/xg_seriea_*.csv
+seriea_data/xg_elo_predictions.csv
+seriea_data/xg_elo_metrics.csv
+seriea_data/xg_elo_report.md

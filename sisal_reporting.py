@@ -56,7 +56,8 @@ def terminal_board(report: pd.DataFrame) -> str:
     lines = [
         'QUOTE SISAL — SERIE A (tutti gli esiti disponibili)',
         'P = probabilità implicita Sisal SENZA MARGINE (stima del mercato).',
-        'DC = previsione Poisson/Dixon–Coles: NON superiore al mercato nel backtest.',
+        'DC = Poisson/Dixon-Coles; Elo e xG+Elo = ipotesi indipendenti (NON validate).',
+        'Le discrepanze indicano disaccordo, NON opportunità comprovate.',
         'Graduatoria solo all’interno di 1X2 o Under/Over; NON suggerisce puntate.',
     ]
     for (_, _, fixture), games in report.groupby(['Data', 'Ora', 'Partita'], sort=False):
@@ -70,7 +71,9 @@ def terminal_board(report: pd.DataFrame) -> str:
                 flag = ' [più probabile nel mercato]' if row.PiuProbabileNelMercato else ''
                 cells.append(f'{row.Mercato} @ {row.QuotaSisal:.2f}: '
                              f'P {_prob(row.ProbMercatoNoVig)}, '
-                             f'DC {_raw_probability(row.ProbPoissonDC)}{flag}')
+                             f'DC {_raw_probability(row.ProbPoissonDC)}, '
+                             f'Elo {_raw_probability(getattr(row,"ProbElo",float("nan")))}, '
+                             f'xG+Elo {_raw_probability(getattr(row,"ProbXGElo",float("nan")))}{flag}')
             lines.append(f'  {group}: ' + ' | '.join(cells))
         if (games.QualitaStorico != 'OK').any():
             lines.append('  AVVISO: risultati storici da aggiornare; stime DC esplorative.')
@@ -102,6 +105,11 @@ def write_readable_report(report: pd.DataFrame, destination: Path, *,
         'sul backtest disponibile è risultata meno precisa del mercato. '
         'Una differenza non dimostra valore atteso positivo.',
         '',
+        '**Elo** e **xG+Elo** sono ipotesi indipendenti dalle quote. '
+        'xG+Elo compare soltanto quando gli xG della stagione e della stessa fonte '
+        'sono verificati; i valori storici Understat non vengono mischiati '
+        'con i dati Sportmonks 2026/27.',
+        '',
         f'Ultimo risultato storico: {last_result.date()}. {freshness_reason}',
         '',
     ]
@@ -130,16 +138,36 @@ def write_readable_report(report: pd.DataFrame, destination: Path, *,
         '',
         '## Tutte le quote, ordinate per probabilità nel singolo mercato',
         '',
-        '| Data | Partita | Mercato | Esito | Quota Sisal | P Sisal no-vig | DC | Posizione |',
-        '|---|---|---|---|---:|---:|---:|---:|',
+        '| Data | Partita | Mercato | Esito | Quota Sisal | P Sisal no-vig | DC | Elo | xG+Elo | Posizione |',
+        '|---|---|---|---|---:|---:|---:|---:|---:|---:|',
     ]
     for _, row in report.iterrows():
         lines.append(
             f'| {row.Data} {row.Ora} | {row.Partita} | {row.GruppoMercato} | '
             f'{row.Mercato} | {row.QuotaSisal:.2f} | '
             f'{_prob(row.ProbMercatoNoVig)} | '
-            f'{_raw_probability(row.ProbPoissonDC)} | {int(row.RankMercato)} |'
+            f'{_raw_probability(row.ProbPoissonDC)} | '
+            f'{_raw_probability(getattr(row,"ProbElo",float("nan")))} | '
+            f'{_raw_probability(getattr(row,"ProbXGElo",float("nan")))} | '
+            f'{int(row.RankMercato)} |'
         )
+    if 'DifferenzaXGEloVsSisal' in report.columns:
+        comparisons=report.dropna(subset=['DifferenzaXGEloVsSisal']).copy()
+        if len(comparisons):
+            comparisons['Ampiezza']=comparisons.DifferenzaXGEloVsSisal.abs()
+            comparisons=comparisons.sort_values('Ampiezza',ascending=False)
+            lines += ['', '## Discrepanze xG+Elo vs Sisal (non sono consigli di puntata)',
+                      '',
+                      '| Partita | Esito | P Sisal | P xG+Elo | Differenza | Fonte xG |',
+                      '|---|---|---:|---:|---:|---|']
+            for _,rec in comparisons.iterrows():
+                source=rec.FonteXG if pd.notna(rec.FonteXG) else 'n/d'
+                lines.append(f'| {rec.Partita} | {rec.Mercato} | '
+                             f'{_prob(rec.ProbMercatoNoVig)} | '
+                             f'{_prob(rec.ProbXGElo)} | '
+                             f'{rec.DifferenzaXGEloVsSisal:+.1%} | {source} |')
+        else:
+            lines += ['', 'Nessuna previsione xG+Elo verificabile per le partite elencate.', '']
     if unrecognized:
         lines += ['', 'Squadre non riconosciute per il modello (ma con quote Sisal '
                   'comunque riportate): ' + '; '.join(sorted(set(unrecognized))) + '.']
