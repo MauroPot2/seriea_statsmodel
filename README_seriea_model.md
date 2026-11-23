@@ -63,6 +63,67 @@ development. Its new results are **retrospective** and must not be called a fres
 untouched holdout. Independent prospective evaluation is required before any
 claim of predictive skill. A discrepancy in Sisal quotes does not establish value.
 
+## Market comparison: bookmaker consensus, not just lowest odds
+
+The next experiment compares market prices rather than blindly ranking the
+lowest odds. It does **not** infer a profitable strategy from bookmaker agreement.
+
+### Historical market quality
+
+    python3 seriea_value_model.py market-backtest --start 2025-08-01
+
+For each completed Serie A fixture, reads the **individual bookmaker opening
+1X2 quotes** from the existing Football-Data files, excluding:
+- market best/average aggregates, which are not independent bookmakers;
+- closing odds, which were not available at opening;
+- Pinnacle/PS since **2025-07-23**, because Football-Data itself flags
+  systematically outdated public Pinnacle API odds from that date;
+- incomplete/invalid bookmaker price sets.
+
+Each available bookmaker is compared against the **median no-vig probabilities
+from at least three OTHER bookmakers**, excluding the target's own price to
+avoid self-comparison. The resulting price-premium indicator does **not** imply
+positive real expected value; bookmakers are not a ground-truth probability source.
+
+The independent market consensus and Bet365's original no-vig opening
+probabilities are scored on **identical completed fixtures** with log loss and
+Brier. This historical comparison is retrospective, not an untouched holdout;
+it includes negative examples. A bootstrapped day-cluster interval measures
+the difference in log loss rather than pretending to measure betting profit.
+
+Files: `market_historical_report.md`, `market_historical_prices.csv`,
+`market_historical_scores.csv` in `seriea_data/`.
+
+### Observed live snapshots, entered from actual sources
+
+    python3 seriea_value_model.py market-compare --quotes /path/to/quotes.csv
+
+A blank schema is provided in `market_quotes_template.csv`. Required fields:
+
+`captured_at,kickoff,home,away,bookmaker,market_group,outcome,odds`
+
+Each **real price** must be collected BEFORE kickoff and include an ISO-8601
+timezone offset. One bookmaker's 1X2 requires all of 1/X/2; U/O 2.5 requires
+both `OVER2.5` and `UNDER2.5`. All sources within a fixture and market
+must have capture timestamps within **120 seconds** of each other, or the group
+is rejected. Four complete bookmaker records are needed for each independent
+leave-one-out comparison.
+
+No example or fake market prices are supplied: this command accepts genuine
+observations only. The software cannot attest that prices transcribed by the
+user were genuinely available or executable, and it does not automatically
+scrape additional bookmaker websites.
+
+Output: `market_live_comparison.csv`, `market_live_report.md`. The
+price premium and adverse-market scenario are comparisons, **not** statistically
+validated edges or betting recommendations. The adverse scenario is NOT a
+confidence interval. Simultaneous book price availability, liquidity,
+limits and execution remain unverified.
+
+The Sisal PDF importer is still available separately; it does not invent
+prices from other bookmaker feeds. Automatic multi-source live comparisons
+will require a legitimate, timestamped odds provider.
+
 ## Statistical evaluation
 
 The model now compares four distinct sets of probabilities:
